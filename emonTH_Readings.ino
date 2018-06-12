@@ -1,3 +1,7 @@
+#include <Adafruit_Sensor.h>
+
+#include <OneWire.h>
+
 /* Sketch to use an emonTH sensor for temperature and humidity readings. 
  * This uses a DHT22 temperature/humidity sensor and a DS18B20 temperature sensor.
    
@@ -14,7 +18,7 @@
 
 /*** DEBUG CONFIG?
 Set this to 1 if initially debugging the code. Otherwise set to 0 and the code will be less computationally intensive as debig steps will be skipped.***/
-const debug = 1;
+boolean debug = 1;
 
 // ****Define some constants****
 const int DS18B20_PWR =       5;
@@ -23,14 +27,23 @@ const int LED =               9;
 const int BATT_ADC =          1;
 const int DIP_switch1 =       7;
 const int DIP_switch2 =       8;
+const int temperature_precision = 11; //9 (93.8ms),10 (187.5ms) ,11 (375ms) or 12 (750ms) bits equal to resolution of 0.5C, 0.25C, 0.125C and 0.0625C.
 
 boolean DHT22_status;
 boolean DS18B20_status;
 boolean DHT22_slowstart;          //Indicates whether testing showed DHT takes longer than 2 seconds to respond after power on.
 
-#define DHTPIN          18
-#define ONE_WIRE_BUS    19
+#define DHTPIN          18    //Location of DHT pin
+#define ONE_WIRE_BUS    19    //This was 17 on early versions of emonTH (<v1.5)
 #define DHTTYPE         DHT22
+
+OneWire oneWire(ONE_WIRE_BUS); //Setup oneWire to communicate with any devices connected via the oneWire bus.
+DallasTemperature sensors(&oneWire); //Indicates that the sensors variable takes a reference to the actual oneWire variable, not it's absolute value.
+
+int numSensors; //Variable for number of sensors
+
+//Initialise addresses of sensors (max 8)
+byte allAddress [8][8];
 
 DHT dht(DHTPIN, DHTTYPE);
 
@@ -61,7 +74,7 @@ void setup() {
       delay(1500);                        //Wait for further 1.5s to allow DHT22 to warm up
       float t = dht.readTemperature();
       float h = dht.readHumidity();
-      DHT22_slowstart = 1
+      DHT22_slowstart = 1;
 
       if (isnan(t) || isnan(h)){
         Serial.println("DHT not identified.");
@@ -95,14 +108,14 @@ void setup() {
     digitalWrite(DS18B20_PWR, LOW);  
   
     if (numSensors == 0){
-      Serial.println("No DS18B20 devices found.")
+      Serial.println("No DS18B20 devices found.");
       DS18B20_status = 0;
     }
     else{
-      DS28B20_status = 1;
+      DS18B20_status = 1;
       Serial.print("Detected "); Serial.print(numSensors); Serial.print(" DS18B20 sensors.");
       if (DHT22_status = 1) {
-        Serial.print("DHT22 and DS18B20 detected, assume DS18B20 is external and will be used for temperature readings.")
+        Serial.print("DHT22 and DS18B20 detected, assume DS18B20 is external and will be used for temperature readings.");
       }       
     }
   }
@@ -119,7 +132,7 @@ void loop() {
   //DHT22 readings take approx. 250ms, DHT readings may have time lag of up to 2 seconds. 
 
   if ((DHT22_status == 1) && (DS18B20_status == 0)){        //DHT for temp. and hum.
-    digitalWrite(DHT_PWR, HIGH);
+    digitalWrite(DHT22_PWR, HIGH);
     delay(2000);
     if (DHT22_slowstart == 1){
       delay(1500);
@@ -139,23 +152,23 @@ void loop() {
   }
 
   else if ((DHT22_status == 1) && (DS18B20_status == 1)){   //DHT for hum. DS18B20 for temp.
-    digitalWrite(DHT_PWR, HIGH);
+    digitalWrite(DHT22_PWR, HIGH);
     delay(2000);
     if (DHT22_slowstart == 1){
       delay(1500);
     }
     float h = dht.readHumidity();
     float t_int = dht.readTemperature();
-    digitalWrite(DHT_PWR, LOW);
+    digitalWrite(DHT22_PWR, LOW);
     
     digitalWrite(DS18B20_PWR, HIGH);
     delay(50);
     sensors.requestTemperatures(); //Issues global temp request to all devices on the bus
-    float t_ext = sensors.getTemp(ByIndex(0); //In the case of multiple sensors, the index pulls readings from a specific sensor.
+    float t_ext1 = sensors.getTemp(allAddress[0]); //In the case of multiple sensors, the index pulls readings from a specific sensor.
     digitalWrite(DS18B20_PWR, LOW);
     
     Serial.print("External temperature: ");
-    Serial.print(t_ext);
+    Serial.print(t_ext1);
     Serial.print(" ºC");
 
     Serial.print("Internal temperature: ");
@@ -173,17 +186,17 @@ void loop() {
     digitalWrite(DS18B20_PWR, HIGH);
     delay(50);
     sensors.requestTemperatures(); //Issues global temp request to all devices on the bus
-    float t_ext = sensors.getTemp(ByIndex(0); //In the case of multiple sensors, the index pulls readings from a specific sensor.
+    float t_ext1 = sensors.getTemp(allAddress[0]); //In the case of multiple sensors, the index pulls readings from a specific sensor.
     digitalWrite(DS18B20_PWR, LOW);
     
     Serial.print("External temperature: ");
-    Serial.print(t_ext);
+    Serial.print(t_ext1);
     Serial.print(" ºC");
 
-    Serial.print("No DHT, humidity and interal temperature readings not possible."
+    Serial.print("No DHT, humidity and interal temperature readings not possible.");
   }
 
   else {
-    Serial.print("No sensors detected.")
+    Serial.print("No sensors detected.");
   }
-
+}
