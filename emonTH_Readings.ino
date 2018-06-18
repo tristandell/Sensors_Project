@@ -1,7 +1,3 @@
-#include <Adafruit_Sensor.h>
-
-#include <OneWire.h>
-
 /* Sketch to use an emonTH sensor for temperature and humidity readings. 
  * This uses a DHT22 temperature/humidity sensor and a DS18B20 temperature sensor.
    
@@ -18,10 +14,17 @@
 #include <JeeLib.h>
 #include <avr/sleep.h> //Avr libs are used to power and sleep specific pins.
 #include <avr/power.h>
+#include <RFM69.h>
+#include <SPI.h> //Required for SPI comms
+#include <SPIFlash.h>
+#include <LowPower.h>
+
 
 /*** DEBUG CONFIG?
 Set this to 1 if initially debugging the code. Otherwise set to 0 and the code will be less computationally intensive as debig steps will be skipped.***/
 boolean debug = 1;
+
+int numNodes = 1; //THIS MUST BE MANUALLY SET
 
 // ****Define some constants for the sensors****
 const int DS18B20_PWR =       5;
@@ -65,12 +68,19 @@ const int DIP_switch2 =       8;
 const int pulse_countINT =    1;
 const int pulse_count_pin =   3;
 
-#define RF69_COMPAT   1           //Set to 1 if using device with RFM69CW, or 0 if using RFM12B
-
-#define RF_freq       RF12_433MHZ //When using the RF12, ensure that the freq matches that of the device. (433/868/915MHz)
+#define RF_freq       RF69_433MHZ //Ensure that the freq matches that of the device. (433/868/915MHz)
 int nodeID =          23;         //RF node ID should be unique on the network
 const int networkID = 45;         //Network ID must be the same as emonBase and emonGLCD / other devices to be communicated with.
 
+boolean promiscuousModeFalse =  false; //Set to true to sniff all packets on network
+boolean promiscuousModeTrue =   true;  //Set to true to sniff all packets on network
+boolean positionChecking =      false; //Node will not start if it's position in the network is unclear
+boolean positionStartup =       true;  //Position when the node starts within the network
+
+int numberPeriods = 1;
+int secondsPerPeriod = 2;
+
+RFM69 radio;
 
 // ****Define the RF payload datastructure and connection checker structure****
 
@@ -82,6 +92,7 @@ typedef struct {
 } RF_payload;
 RF_payload emonth;  //NOT SURE THIS IS NECESSARY
 
+//Connection checker structure to be sent
 typedef struct {
   int con_status;
 } connection_check;
@@ -90,9 +101,11 @@ volatile unsigned long pulseCount;  //The volatile qualifier indicates that this
 unsigned long WDT_number;
 boolean p;
 
-unsigned long now = 0;
+SPIFlash flash(8, 0xEF30); //Use EF40 for 16mbit windbond chip
 
 //##################################################################################################################################
+//SETUP
+
 void setup() {
   //Assign input & output pins; set initial on/off states; 
   pinMode(DHT22_PWR, OUTPUT);
@@ -104,7 +117,7 @@ void setup() {
   digitalWrite(LED, HIGH); //Turn LED on to show programme is running
   
 
-  //**Read DIP switch positions to assign node ID and initialise RF chip**
+  //**Read DIP switch positions to assign node ID**
   pinMode(DIP_switch1, INPUT_PULLUP); //INPUT_PULLUP is used to steer the pins to a known state if no input is detected. If switch is engaged, pin is LOW and vice versa. 
   pinMode(DIP_switch2, INPUT_PULLUP);
   boolean DIP1 = digitalRead(DIP_switch1);
@@ -114,9 +127,12 @@ void setup() {
   if ((DIP1 == 0) && (DIP2 == 1)) nodeID = nodeID+1;
   if ((DIP1 == 1) && (DIP2 == 0)) nodeID = nodeID+2;
   if ((DIP1 == 0) && (DIP2 == 0)) nodeID = nodeID+3;
-  
-  rf12_initialize(nodeID, RF_freq, networkID); //MAY NEED TO CHANGE FOR RF69
 
+  
+  /*Waiting time is related to position in network, will need to write TimeWaiting() funct. when needed.
+  positionInNetwork(&numberPeriods, &secondsPerPeriod);
+  radio.promiscuous(promiscuousModeFalse);
+  if (positionChecking == true) TimeWaiting(&numberPeriods);*/
 
   //**Test DHT is responding and setup serial connection**
   Serial.begin(9600);
@@ -159,23 +175,21 @@ void setup() {
 
   Serial.print("DS18B20 Test... ");
 
-  
-
-  numSensors = (sensors.getDeviceCount()); //Counts number of connected sensors
+  numSensors = (sensors.getDeviceCount()); //Counts number of connected DS18B20 sensors
 
   //Search for one wire devices and copy the device addresses to the addrArray.
   byte j=0; //A byte is simply a class storing an nteger between 0-255
   
   while ((j < numSensors) && (oneWire.search(allAddress[j]))) j++; //Searches for location of DS19B20 sensors. If a sensor is found, then addrArray is filled with its location and true is returned.
   digitalWrite(DS18B20_PWR, LOW);  
-
   if (numSensors == 0){
     Serial.println("No DS18B20 devices found.");
     DS18B20_status = 0;
   }
+  
   else{
     DS18B20_status = 1;
-    Serial.println("DS18B20 detected. "); Serial.print(numSensors); Serial.println(" DS18B20 sensors.");
+    Serial.println("DS18B20 detected. "); Serial.print("DS18B20 sensors detected: "); Serial.println(numSensors);
     if (DHT22_status == 1) {
       Serial.println("DHT22 and DS18B20 detected, assume DS18B20 is external and will be used for temperature readings.");
     }       
@@ -188,21 +202,25 @@ void setup() {
   p = 0; //Flag for new pulse
 
   attachInterrupt(pulse_countINT, onPulse, RISING); //Interrupts code when pulse_countINT goes from LOW to HIGH, running the onPulse function.
-}
 
-//Interrupt routine - runs every time a rising edge of a pulse is detected.
-void onPulse() {
-  p = 1; //Flag identifying new pulse as true
-  pulseCount++; //Number of pulses since last RF sent
+  //**Initialise RF chip**
+  Serial.print("Radio initialising... ");
+  radio.initialize(RF_freq, nodeID, networkID); 
+  delay(50);
+  radio.promiscuous(promiscuousModeTrue); //Sniff data packets on the network
+  Serial.print("Done.\n");
+  
 }
 
 //##################################################################################################################################
+//LOOP
+
 void loop() {
 
   //**Define RF pulses**
   
   if (p) {      // if (p) is met if p != 0
-    delay(pulse_max_duration);
+    Sleepy::loseSomeTime(pulse_max_duration);
     p = 0;
   }
 
@@ -210,13 +228,11 @@ void loop() {
     WDT_number++;
   }
 
-  if (WDT_number > WDT_max_number || pulseCount >= pulse_max_number) {
+  if (WDT_number > WDT_max_number || pulseCount >= pulse_max_number) { //WDT_max = 690 , pulseMax = 100 (x)
     noInterrupts();
     emonth.pulsecount = emonth.pulsecount + (unsigned int) pulseCount; //An unsigned int can only hold 0 and +ve numbers, not -ve.
     pulseCount = 0;
     interrupts();
-    
-  
     
     
     //DHT22 readings take approx. 250ms, DHT readings may have time lag of up to 2 seconds. 
@@ -224,12 +240,10 @@ void loop() {
     if ((DHT22_status == 1) && (DS18B20_status == 0)){        //DHT for temp. and hum.
       digitalWrite(DHT22_PWR, HIGH);
       delay(2000);
-      if (DHT22_slowstart == 1){
-        delay(1500);
-      }
+      if (DHT22_slowstart == 1) delay(1500);
       float t_int = dht.readTemperature();
       float h = dht.readHumidity();
-  
+        
       if (tick == 0){
         Serial.println("");
         tick = 1;
@@ -248,9 +262,7 @@ void loop() {
     else if ((DHT22_status == 1) && (DS18B20_status == 1)){   //DHT for hum. DS18B20 for temp.
       digitalWrite(DHT22_PWR, HIGH);
       delay(2000);
-      if (DHT22_slowstart == 1){
-        delay(1500);
-      }
+      if (DHT22_slowstart == 1) delay(1500);
       float h = dht.readHumidity();
       float t_int = dht.readTemperature();
       digitalWrite(DHT22_PWR, LOW);
@@ -281,7 +293,7 @@ void loop() {
       delay(2000); //Take measurement every 2s  
     }
   
-    else if ((DHT22_status == 0) && (DS18B20_status == 1)){   //DS12B20 for temp., no hum.
+    else if ((DHT22_status == 0) && (DS18B20_status == 1)){   //DS12B20 for temp., no humidity
       digitalWrite(DS18B20_PWR, HIGH);
       delay(50);
       sensors.requestTemperatures(); //Issues global temp request to all devices on the bus
@@ -307,17 +319,42 @@ void loop() {
     }
 
     //****RF Transmission****
-    power_spi_enable();
-    rf12_sleep(RF12_WAKEUP);
+    radio.receiveDone(); //Wake RF chip
     delay(100);
-    rf12_sendNow(0, &emonth, sizeof emonth);
-    rf12_sendWait(2); //Set to 2 if fuses are Arduino default, set to 3 if 258 CK startup fuses are used.
-    rf12_sleep(RF12_SLEEP);
+    send_information();
+    radio.sleep();
     delay(100);
-    power_spi_disable();
+    TimeCycle(&numberPeriods); //This causes RF chip to sleep until it's next allocated transmission slot.
 
-    WDT_number = 0;
-    
-    
+    WDT_number = 0;        
   }
 }
+
+//##################################################################################################################################
+//FUNCTIONS:
+
+void send_information() {
+  Serial.print("Readings about to be sent... ");
+  radio.send(1, 32, sizeof(RF_payload));
+  Serial.print("Done! \n");
+  flash.chipErase();
+  delay(3);
+}
+
+void TimeCycle(int *numberPeriods_local) { //The "*" acts as a pointer, which instructs the function to take the integer value of the variable
+  delay(60);
+  for (int i = 1; i <= numNodes; i++) {
+    for (int k = 1; k <= numberPeriods_local; k++) {
+      LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF);
+      delay(2);
+    }
+  }
+}
+
+//Interrupt routine - runs every time a rising edge of a pulse is detected.
+void onPulse() {
+  p = 1; //Flag identifying new pulse as true
+  pulseCount++; //Number of pulses since last RF sent
+}
+
+
