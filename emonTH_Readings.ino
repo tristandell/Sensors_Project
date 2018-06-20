@@ -63,19 +63,19 @@ const unsigned long pulse_max_number = 100;   // Data is sent after this number 
 const unsigned long pulse_max_duration = 50;  //Maximum pulse duration for RF transmission*
 //*Unsigned long constants store positive numbers in 32 bit format (between 0 - (2^32-1))
 
-const int DIP_switch1 =       7; //Dip switches will be used to assign network position
-const int DIP_switch2 =       8;
-const int pulse_countINT =    1;
-const int pulse_count_pin =   3;
+const int DIP_switch1         = 7; //Dip switches will be used to assign network position
+const int DIP_switch2         = 8;
+const int pulse_countINT      = 1;
+const int pulse_count_pin     = 3;
 
-#define RF_freq       RF69_433MHZ //Ensure that the freq matches that of the device. (433/868/915MHz)
-int nodeID =          23;         //RF node ID should be unique on the network
-const int networkID = 45;         //Network ID must be the same as emonBase and emonGLCD / other devices to be communicated with.
 
-boolean promiscuousModeFalse =  false; //Set to true to sniff all packets on network
-boolean promiscuousModeTrue =   true;  //Set to true to sniff all packets on network
-boolean positionChecking =      false; //Node will not start if it's position in the network is unclear
-boolean positionStartup =       true;  //Position when the node starts within the network
+#define RF_freq      RF69_433MHZ  //Ensure that the freq matches that of the device. (433/868/915MHz)
+int MYNODEID         = 23;        //RF node ID should be unique on the network
+const int TONODEID   = 24;        //Target RF node ID
+#define NETWORKID    45          //Network ID must be the same as emonBase and emonGLCD / other devices to be communicated with.
+
+boolean positionChecking = false; //Node will not start if it's position in the network is unclear
+boolean positionStartup  = true;  //Position when the node starts within the network
 
 int numberPeriods = 1;
 int secondsPerPeriod = 2;
@@ -90,12 +90,13 @@ typedef struct {
   int humidity;
   unsigned long pulsecount;
 } RF_payload;
-RF_payload emonth;  //NOT SURE THIS IS NECESSARY
+//Can use to assign and point to values in this datastructure. e.g. emonth.temp = x or send(&emonth)
+RF_payload emonTH;  
 
 //Connection checker structure to be sent
-typedef struct {
+/*typedef struct {
   int con_status;
-} connection_check;
+} connection_check;*/
 
 volatile unsigned long pulseCount;  //The volatile qualifier indicates that this value may be changed at any moment without direct action from the code.
 unsigned long WDT_number;
@@ -113,7 +114,6 @@ void setup() {
   pinMode(LED, OUTPUT);
   pinMode(BATT_ADC, INPUT);
   pinMode(pulse_count_pin, INPUT_PULLUP);
-  pinMode(LED, OUTPUT);
   digitalWrite(LED, HIGH); //Turn LED on to show programme is running
   
 
@@ -123,10 +123,10 @@ void setup() {
   boolean DIP1 = digitalRead(DIP_switch1);
   boolean DIP2 = digitalRead(DIP_switch2);
 
-  if ((DIP1 == 1) && (DIP2 == 1)) nodeID = nodeID;
-  if ((DIP1 == 0) && (DIP2 == 1)) nodeID = nodeID+1;
-  if ((DIP1 == 1) && (DIP2 == 0)) nodeID = nodeID+2;
-  if ((DIP1 == 0) && (DIP2 == 0)) nodeID = nodeID+3;
+  if ((DIP1 == 1) && (DIP2 == 1)) MYNODEID = MYNODEID;
+  if ((DIP1 == 0) && (DIP2 == 1)) MYNODEID = MYNODEID+1;
+  if ((DIP1 == 1) && (DIP2 == 0)) MYNODEID = MYNODEID+2;
+  if ((DIP1 == 0) && (DIP2 == 0)) MYNODEID = MYNODEID+3;
 
   
   /*Waiting time is related to position in network, will need to write TimeWaiting() funct. when needed.
@@ -196,19 +196,22 @@ void setup() {
   }
 
   //**Set pulse parameters for RF chip**
-  emonth.pulsecount = 0;  //Total no. of pulses(?)
-  pulseCount = 0;         //Pulses since last transmission(?)
-  WDT_number = 720;
-  p = 0; //Flag for new pulse
+  emonTH.pulsecount = 0;    //Total no. of pulses(?)
+  pulseCount        = 0;    //Pulses since last transmission(?)
+  WDT_number        = 720;
+  p                 = 0;    //Flag for new pulse
 
   attachInterrupt(pulse_countINT, onPulse, RISING); //Interrupts code when pulse_countINT goes from LOW to HIGH, running the onPulse function.
 
   //**Initialise RF chip**
   Serial.print("Radio initialising... ");
-  radio.initialize(RF_freq, nodeID, networkID); 
+  radio.initialize(RF_freq, MYNODEID, NETWORKID);
+  radio.setHighPower(); 
   delay(50);
-  radio.promiscuous(promiscuousModeTrue); //Sniff data packets on the network
+  radio.promiscuous(true); //Sniff data packets on the network
   Serial.print("Done.\n");
+
+  delay(1000); //Delay to allow setup to complete before loop.
   
 }
 
@@ -219,18 +222,20 @@ void loop() {
 
   //**Define RF pulses**
   
-  if (p) {      // if (p) is met if p != 0
-    Sleepy::loseSomeTime(pulse_max_duration);
+  /*if (p) {      // 'if (p)' is met when p != 0
+    Sleepy::loseSomeTime(pulse_max_duration); //Sleepy:loseSomeTime puts the device into low-power mode 
     p = 0;
-  }
+  }*/
 
-  if (Sleepy::loseSomeTime(WDT_period) == 1) { //Sleepy:loseSomeTime puts the device into low-power mode 
+  /*if (Sleepy::loseSomeTime(WDT_period) == 1) { 
     WDT_number++;
-  }
+  }*/
 
-  if (WDT_number > WDT_max_number || pulseCount >= pulse_max_number) { //WDT_max = 690 , pulseMax = 100 (x)
+  //if (WDT_number > WDT_max_number || pulseCount >= pulse_max_number) { 
+    
+    //**Update the pulsecount in the RF_payload **
     noInterrupts();
-    emonth.pulsecount = emonth.pulsecount + (unsigned int) pulseCount; //An unsigned int can only hold 0 and +ve numbers, not -ve.
+    emonTH.pulsecount = emonTH.pulsecount + (unsigned int) pulseCount; //An unsigned int can only hold 0 and +ve numbers, not -ve.
     pulseCount = 0;
     interrupts();
     
@@ -319,37 +324,39 @@ void loop() {
     }
 
     //****RF Transmission****
-    radio.receiveDone(); //Wake RF chip
+    //radio.receiveDone(); //Wake RF chip
     delay(100);
     send_information();
-    radio.sleep();
-    delay(100);
-    TimeCycle(&numberPeriods); //This causes RF chip to sleep until it's next allocated transmission slot.
+    //radio.sleep();
+    
+    //****Tell RF chip to sleep until next allocated transmission slot.****
+    
 
-    WDT_number = 0;        
+    //WDT_number = 0; //Reset watch-dog timer number
   }
-}
+
 
 //##################################################################################################################################
 //FUNCTIONS:
 
 void send_information() {
-  Serial.print("Readings about to be sent... ");
-  radio.send(1, 32, sizeof(RF_payload));
+  Serial.print("Data about to be sent... ");
+  radio.send(TONODEID, &emonTH, sizeof(RF_payload));    //radio.send(ToNodeID, sendBuffer, sendLength), buffer refers to the data to be sent.
   Serial.print("Done! \n");
   flash.chipErase();
-  delay(3);
+  delay(100);
 }
 
-void TimeCycle(int *numberPeriods_local) { //The "*" acts as a pointer, which instructs the function to take the integer value of the variable
+ //****Tell RF chip to sleep until next allocated transmission slot.****
+/*void TimeCycle(int *numberPeriods) { //The "*" acts as a pointer, which instructs the function to take the integer value of the variable
   delay(60);
   for (int i = 1; i <= numNodes; i++) {
-    for (int k = 1; k <= numberPeriods_local; k++) {
+    for (int k = 1; k <= numberPeriods; k++) {
       LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF);
       delay(2);
     }
   }
-}
+}*/
 
 //Interrupt routine - runs every time a rising edge of a pulse is detected.
 void onPulse() {
